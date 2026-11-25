@@ -1,0 +1,168 @@
+@model Ordo.Web.Areas.Kanban.BoardViewModel
+@using System.Security.Claims
+@{
+    Layout = "_DashboardLayout";
+    ViewData["Title"] = Model.BoardName;
+    ViewData["BreadcrumbProjectId"] = Model.ProjectId;
+    ViewData["BreadcrumbBoardId"] = Model.BoardId;
+    ViewData["BreadcrumbBoardName"] = Model.BoardName;
+    var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+}
+
+@section styles {
+    <link href="~/css/kanban.css" asp-append-version="true" rel="stylesheet" />
+    <link href="~/css/tasks.css" asp-append-version="true" rel="stylesheet" />
+    <link href="~/css/signalr-banner.css" asp-append-version="true" rel="stylesheet" />
+}
+
+<div class="kanban-context-bar">
+    <a asp-area="Progetti" asp-controller="Progetti" asp-action="Dettaglio" asp-route-id="@Model.ProjectId" class="kanban-back-link">
+        <i class="fa-solid fa-arrow-left"></i> Progetto
+    </a>
+    <span class="kanban-context-separator">/</span>
+    <span class="kanban-context-current">@Model.BoardName</span>
+</div>
+
+<div id="lostConnection" class="ordo-signalr-banner d-none">
+    <i class="fa-solid fa-triangle-exclamation"></i> Connessione in tempo reale persa, riconnessione in corso...
+</div>
+<div id="lostConnectionManualRetry" class="ordo-signalr-banner ordo-signalr-banner-error d-none">
+    <i class="fa-solid fa-plug-circle-xmark"></i> Impossibile riconnettersi.
+    <a href="javascript:location.reload()">Ricarica la pagina</a>
+</div>
+@Html.AntiForgeryToken()
+
+<div class="kanban-toolbar mb-3">
+    <h1 class="kanban-page-title mb-0">@Model.BoardName</h1>
+    <a class="ordo-btn-primary btn btn-primary"
+       asp-area="Tasks"
+       asp-controller="Tasks"
+       asp-action="Edit"
+       asp-route-boardId="@Model.BoardId">
+        <i class="fa-solid fa-plus"></i> Nuovo task
+    </a>
+</div>
+
+<div id="pageId" class="kanban-board">
+    <div class="kanban-column" v-for="col in columns" :key="col.stato">
+        <div class="kanban-column-header">
+            <span>{{ col.titolo }}</span>
+            <span class="kanban-count">{{ tasksByStato(col.stato).length }}</span>
+        </div>
+        <div class="kanban-column-body"
+             @@dragover.prevent
+             @@drop="onDrop(col.stato)">
+
+            <div class="kanban-card"
+                 v-for="task in tasksByStato(col.stato)"
+                 :key="task.id"
+                 draggable="true"
+                 @@dragstart="onDragStart(task)"
+                 @@dragover.prevent
+                 @@drop.stop="onDropOnTask(task)"
+                 @@click="openTaskDetail(task.id)"
+                 @@keydown.enter="openTaskDetail(task.id)"
+                 @@keydown.space.prevent="openTaskDetail(task.id)"
+                 role="button"
+                 tabindex="0">
+
+                <div class="kanban-card-priority" :class="'priority-' + task.priorita"></div>
+                <b>{{ task.titolo }}</b>
+                <div class="kanban-card-meta" v-if="task.scadenza">
+                    <i class="fa-regular fa-clock"></i> {{ formatDate(task.scadenza) }}
+                </div>
+                <div class="kanban-card-assignee" v-if="task.assignedUserName">
+                    {{ task.assignedUserName }}
+                </div>
+                <label class="kanban-card-move">
+                    <span class="visually-hidden">Sposta {{ task.titolo }} in</span>
+                    <select :value="task.stato"
+                            @@click.stop
+                            @@keydown.stop
+                            @@change="moveTaskFromSelect(task, $event)">
+                        <option v-for="targetColumn in columns"
+                                :key="targetColumn.stato"
+                                :value="targetColumn.stato">
+                            {{ targetColumn.titolo }}
+                        </option>
+                    </select>
+                </label>
+            </div>
+
+        </div>
+    </div>
+</div>
+
+<script src="/js/bundle-vue.js" asp-append-version="true"></script>
+<script src="/js/bundle-signalr.js" asp-append-version="true"></script>
+<script src="~/js/signalRConnectionManager.js" asp-append-version="true"></script>
+<script src="~/Areas/Kanban/Board.js" asp-append-version="true"></script>
+
+<script type="application/json" id="Seed_JSON">
+    @Html.Raw(Model.ToJson())
+</script>
+<script type="text/javascript">
+    var seed = JSON.parse(document.getElementById("Seed_JSON").innerText);
+    var kanbanApp = Ordo.Kanban.createBoardApp(seed, "@Url.Action("MoveTask")");
+    var kanbanVm = kanbanApp.mount("#pageId");
+
+    // Collegamento SignalR: entra nel gruppo della Board e ascolta gli eventi in tempo reale
+    var signalRManager = new SignalRConnectionManager("/OrdoHub", "@Model.BoardId", "JoinGroup", "LeaveGroup");
+    signalRManager.registerEvents();
+    var stateLabels = ["Da fare", "In corso", "Review", "Done"];
+
+    signalRManager.connection.on("TaskMoved", function (taskId, nuovoStato, titolo) {
+        Ordo.Kanban.applyRemoteMove(kanbanVm, taskId, nuovoStato);
+        ordoNotify("\u00ab" + titolo + "\u00bb è stato spostato in " + (stateLabels[nuovoStato] || "un'altra colonna") + ".", "/Progetti/Dettaglio/@Model.ProjectId?tab=board", "board");
+    });
+    signalRManager.connection.on("TaskCreated", function (task) {
+        kanbanVm.addTask(task);
+        ordoNotify("Nuovo task: \u00ab" + task.titolo + "\u00bb in " + (stateLabels[task.stato] || "board") + ".", "/Progetti/Dettaglio/@Model.ProjectId?tab=board&task=" + task.id, "task");
+    });
+    signalRManager.connection.on("TaskUpdated", function (taskUpdate) {
+        kanbanVm.updateTask(taskUpdate.task);
+        if (!taskUpdate.isAssignmentChanged) {
+            ordoNotify("\u00ab" + taskUpdate.task.titolo + "\u00bb è stato aggiornato.", "/Progetti/Dettaglio/@Model.ProjectId?tab=board&task=" + taskUpdate.task.taskId, "task");
+        }
+    });
+    signalRManager.connection.on("TaskDeleted", function (task) {
+        kanbanVm.removeTask(task.taskId);
+        ordoNotify("\u00ab" + task.titolo + "\u00bb è stato eliminato.", "/Progetti/Dettaglio/@Model.ProjectId?tab=board", "board");
+    });
+    signalRManager.connection.on("UserAssigned", function (taskId, userId, assignedUserName, titolo) {
+        kanbanVm.updateTaskAssignee(taskId, userId, assignedUserName);
+        ordoNotify(assignedUserName
+            ? "\u00ab" + titolo + "\u00bb è stato assegnato a " + assignedUserName + "."
+            : "L'assegnazione di \u00ab" + titolo + "\u00bb è stata rimossa.", "/Progetti/Dettaglio/@Model.ProjectId?tab=board&task=" + taskId, "task");
+    });
+
+    // La board stessa può essere rinominata o cancellata da un altro utente mentre la guardi
+    signalRManager.connection.on("BoardDeleted", function (projectId, boardId, nome) {
+        if (boardId === "@Model.BoardId") {
+            window.location = "/Progetti/Dettaglio/@Model.ProjectId?notice=board-deleted";
+        }
+    });
+    signalRManager.connection.on("BoardUpdated", function (projectId, boardId, nome) {
+        if (boardId === "@Model.BoardId") {
+            var titleEl = document.querySelector(".kanban-page-title");
+            if (titleEl) titleEl.textContent = nome;
+        }
+    });
+
+    // Notifica personale: ti hanno assegnato un task su un'ALTRA board (non questa che stai guardando)
+    signalRManager.connection.on("TaskChangedForUser", function (tipo, titolo, projectNome, projectId, boardId, taskId) {
+        if (tipo !== "Assigned") return;
+        if (boardId === "@Model.BoardId") return; // sei già su questa board, TaskMoved/UserAssigned bastano
+
+        ordoNotify("Ti è stata assegnata l'attività «" + titolo + "» in " + projectNome + ".", "/Progetti/Dettaglio/" + projectId + "?tab=board&task=" + taskId, "task");
+    });
+
+    window.addEventListener("ordo:signalr-reconnected", function () {
+        window.location.reload();
+    });
+
+    // Entra sia nel gruppo della Board (aggiornamenti sulla board) sia nel proprio canale
+    // personale (notifiche individuali anche quando non sei su questa pagina)
+    signalRManager.addAdditionalGroup("@currentUserId");
+    signalRManager.startConnection();
+</script>

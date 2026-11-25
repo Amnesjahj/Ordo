@@ -1,0 +1,28 @@
+@model ProfileViewModel
+@{
+    Layout = "_ProfileLayout";
+    ViewData["Title"] = "Profilo";
+    var nomeVisualizzato = string.IsNullOrWhiteSpace(Model.NomeCompleto) ? Model.Email : Model.NomeCompleto;
+    var iniziali = string.Concat(nomeVisualizzato
+        .Split(' ', StringSplitOptions.RemoveEmptyEntries)
+        .Take(2)
+        .Select(parte => char.ToUpperInvariant(parte[0])));
+}
+
+<div class="ordo-profile-page">
+    <h1>Profilo</h1>
+
+    <section class="ordo-profile-card" aria-label="Dati profilo">
+        <div class="ordo-avatar" aria-hidden="true">@iniziali</div>
+        <div class="ordo-user-details">
+            <div class="ordo-user-name">@nomeVisualizzato</div>
+            @if (!string.IsNullOrWhiteSpace(Model.NickName))
+            {
+                <div>@@@Model.NickName</div>
+            }
+            <div><i class="fa-regular fa-envelope"></i> @Model.Email</div>
+        </div>
+        <a class="ordo-edit-profile" href="/Profile/Edit"><i class="fa-regular fa-pen-to-square"></i> Modifica profilo</a>
+    </section>
+
+</div>

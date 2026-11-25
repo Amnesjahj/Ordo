@@ -1,0 +1,470 @@
+using Microsoft.AspNetCore.Mvc;
+using System;
+using System.Collections.Generic;
+using System.Security.Claims;
+using System.Threading.Tasks;
+using Ordo.Services.Shared;
+using Ordo.Web.Infrastructure;
+using Ordo.Web.SignalR;
+using Ordo.Web.SignalR.Hubs.Events;
+using System.Linq;
+
+namespace Ordo.Web.Areas.Progetti
+{
+    [Area("Progetti")]
+    public partial class ProgettiController : AuthenticatedBaseController
+    {
+        private readonly SharedService _sharedService;
+        private readonly IPublishDomainEvents _publisher;
+
+        public ProgettiController(SharedService sharedService, IPublishDomainEvents publisher): base(sharedService)
+        {
+            _sharedService = sharedService;
+            _publisher = publisher;
+        }
+
+        private bool TryGetCurrentUserId(out Guid userId)
+        {
+            var value = User.FindFirstValue(ClaimTypes.NameIdentifier);
+            return Guid.TryParse(value, out userId);
+        }
+
+        private async Task<Guid[]> GetInvolvedUserIds(Guid projectId, Guid ownerId)
+        {
+            var members = await _sharedService.Query(new ProjectMembersQuery { ProjectId = projectId });
+            return members.Members.Select(member => member.UserId)
+                .Append(ownerId)
+                .Distinct()
+                .ToArray();
+        }
+
+        [HttpGet]
+        public virtual IActionResult Index()
+        {
+            return RedirectToAction("Index", "Dashboard", new { area = "" });
+        }
+
+        [HttpPost]
+        public virtual async Task<IActionResult> Edit(EditViewModel model)
+        {
+            if (!TryGetCurrentUserId(out var currentUserId))
+                return Challenge();
+
+            if (model.Id.HasValue)
+            {
+                var esistente = await _sharedService.Query(new ProjectDetailQuery { Id = model.Id.Value });
+                if (esistente == null || esistente.OwnerId != currentUserId)
+                    return Forbid();
+            }
+
+            if (ModelState.IsValid)
+            {
+                try
+                {
+                    var isUpdate = model.Id.HasValue;
+                    model.Id = await _sharedService.Handle(model.ToAddOrUpdateProjectCommand(currentUserId));
+
+                    if (isUpdate)
+                    {
+                        await _publisher.Publish(new ProjectUpdatedEvent
+                        {
+                            ProjectId = model.Id.Value,
+                            Nome = model.Nome,
+                            Descrizione = model.Descrizione,
+                            UtentiCoinvolti = await GetInvolvedUserIds(model.Id.Value, currentUserId)
+                        });
+                    }
+                    else
+                    {
+                        var boardId = await _sharedService.Handle(new AddOrUpdateBoardCommand
+                        {
+                            Nome = "Board",
+                            ProjectId = model.Id.Value
+                        });
+
+                        await _publisher.Publish(new BoardCreatedEvent
+                        {
+                            ProjectId = model.Id.Value,
+                            BoardId = boardId,
+                            BoardNome = "Board",
+                            UtentiCoinvolti = new[] { currentUserId }
+                        });
+                    }
+
+                    Alerts.AddSuccess(this, "Progetto salvato correttamente");
+
+                    if (Request.Headers["X-Requested-With"] == "XMLHttpRequest")
+                    {
+                        return Json(new
+                        {
+                            success = true,
+                            id = model.Id,
+                            nome = model.Nome,
+                            descrizione = model.Descrizione ?? string.Empty
+                        });
+                    }
+                }
+                catch (Exception e)
+                {
+                    ModelState.AddModelError(string.Empty, e.Message);
+                }
+            }
+
+            if (ModelState.IsValid == false)
+            {
+                if (Request.Headers["X-Requested-With"] == "XMLHttpRequest")
+                {
+                    return BadRequest(new
+                    {
+                        success = false,
+                        error = "Errore in salvataggio del progetto"
+                    });
+                }
+
+                Alerts.AddError(this, "Errore in salvataggio del progetto");
+                return RedirectToAction("Index", "Dashboard", new { area = "" });
+            }
+
+            return RedirectToAction(Actions.Dettaglio(model.Id.Value));
+        }
+
+        [HttpPost]
+        public virtual async Task<IActionResult> Delete(Guid id)
+        {
+            if (!TryGetCurrentUserId(out var currentUserId))
+                return Challenge();
+
+            var progetto = await _sharedService.Query(new ProjectDetailQuery { Id = id });
+
+            if (progetto == null || progetto.OwnerId != currentUserId)
+                return Forbid();
+
+            var utentiCoinvolti = await GetInvolvedUserIds(id, progetto.OwnerId);
+            await _sharedService.Handle(new DeleteProjectCommand { Id = id });
+            await _publisher.Publish(new ProjectDeletedEvent { ProjectId = id, UtentiCoinvolti = utentiCoinvolti });
+
+            Alerts.AddSuccess(this, "Progetto eliminato");
+
+            var dashboardUrl = Url.Action("Index", "Dashboard", new { area = "" });
+
+            if (Request.Headers["X-Requested-With"] == "XMLHttpRequest")
+            {
+                return Json(new
+                {
+                    success = true,
+                    redirectUrl = dashboardUrl
+                });
+            }
+
+            return RedirectToAction("Index", "Dashboard", new { area = "" });
+        }
+
+        [HttpGet]
+        public virtual async Task<IActionResult> Dettaglio(Guid id)
+        {
+            if (!TryGetCurrentUserId(out var currentUserId))
+                return Challenge();
+
+            var progetto = await _sharedService.Query(new ProjectDetailQuery { Id = id });
+            if (progetto == null)
+            {
+                Alerts.AddWarning(this, "Il progetto non è più disponibile.");
+                return RedirectToAction("Index", "Dashboard", new { area = "" });
+            }
+
+            var membri = await _sharedService.Query(new ProjectMembersQuery { ProjectId = id });
+            var isOwner = progetto.OwnerId == currentUserId;
+            var isMember = membri.Members.Any(m => m.UserId == currentUserId);
+
+            if (!isOwner && !isMember)
+                return Forbid();
+
+            var boards = await _sharedService.Query(new BoardsByProjectQuery { ProjectId = id });
+            if (!boards.Boards.Any() && isOwner)
+            {
+                var boardId = await _sharedService.Handle(new AddOrUpdateBoardCommand
+                {
+                    Nome = "Board",
+                    ProjectId = id
+                });
+
+                await _publisher.Publish(new BoardCreatedEvent
+                {
+                    ProjectId = id,
+                    BoardId = boardId,
+                    BoardNome = "Board",
+                    UtentiCoinvolti = await GetInvolvedUserIds(id, progetto.OwnerId)
+                });
+
+                boards = await _sharedService.Query(new BoardsByProjectQuery { ProjectId = id });
+            }
+            var boardTasks = new List<BoardTaskViewModel>();
+            foreach (var board in boards.Boards)
+            {
+                var tasks = await _sharedService.Query(new TasksByBoardQuery { BoardId = board.Id });
+                boardTasks.AddRange(tasks.Tasks.Select(task => new BoardTaskViewModel
+                {
+                    Id = task.Id,
+                    BoardId = board.Id,
+                    Titolo = task.Titolo,
+                    Descrizione = task.Descrizione,
+                    Priorita = task.Priorita,
+                    Stato = task.Stato,
+                    Scadenza = task.Scadenza,
+                    AssignedUserId = task.AssignedUserId,
+                    AssignedUserName = task.AssignedUserNickName
+                }));
+            }
+            var messages = await _sharedService.Query(new ProjectChatMessagesQuery
+            {
+                ProjectId = id,
+                Take = 50
+            });
+
+            var model = new DettaglioViewModel();
+            model.SetProject(progetto, isOwner);
+            model.SetBoards(boards);
+            model.SetMembers(membri, progetto.OwnerId);
+            var owner = await _sharedService.Query(new UserDetailQuery { Id = progetto.OwnerId });
+            if (owner != null && !model.Membri.Any(member => member.UserId == owner.Id))
+            {
+                model.Membri = model.Membri.Append(new MemberItemViewModel
+                {
+                    UserId = owner.Id,
+                    NomeCompleto = $"{owner.FirstName} {owner.LastName} (proprietario)",
+                    Email = owner.Email
+                }).ToArray();
+            }
+            model.SetBoardTasks(boardTasks);
+            model.SetMessages(messages);
+
+            return View(model);
+        }
+
+        [HttpGet]
+        public virtual async Task<IActionResult> ChatMessages(Guid id, int skip = 50)
+        {
+            if (!TryGetCurrentUserId(out var currentUserId))
+                return Challenge();
+
+            var progetto = await _sharedService.Query(new ProjectDetailQuery { Id = id });
+            if (progetto == null)
+                return NotFound();
+
+            var membri = await _sharedService.Query(new ProjectMembersQuery { ProjectId = id });
+            if (progetto.OwnerId != currentUserId && !membri.Members.Any(member => member.UserId == currentUserId))
+                return Forbid();
+
+            var page = await _sharedService.Query(new ProjectChatMessagesQuery
+            {
+                ProjectId = id,
+                Skip = Math.Max(0, skip),
+                Take = 50
+            });
+
+            return Json(new
+            {
+                messages = page.Messages.Select(message => new
+                {
+                    id = message.Id,
+                    userId = message.UserId,
+                    userName = message.UserName,
+                    testo = message.Testo,
+                    dataCreazione = message.DataCreazione
+                }),
+                hasMore = page.HasMore
+            });
+        }
+
+        [HttpPost]
+        public virtual async Task<IActionResult> ChatInvia(ChatMessageFormViewModel model)
+        {
+            if (!TryGetCurrentUserId(out var currentUserId))
+                return Challenge();
+
+            var progetto = await _sharedService.Query(new ProjectDetailQuery { Id = model.ProjectId });
+            if (progetto == null)
+                return NotFound();
+
+            var membri = await _sharedService.Query(new ProjectMembersQuery { ProjectId = model.ProjectId });
+            if (progetto.OwnerId != currentUserId && !membri.Members.Any(member => member.UserId == currentUserId))
+                return Forbid();
+
+            if (!ModelState.IsValid)
+            {
+                if (Request.Headers["X-Requested-With"] == "XMLHttpRequest")
+                {
+                    return BadRequest(new
+                    {
+                        success = false,
+                        error = "Scrivi un messaggio di massimo 2000 caratteri."
+                    });
+                }
+
+                Alerts.AddError(this, "Messaggio non valido");
+                return RedirectToAction(nameof(Dettaglio), new { id = model.ProjectId, tab = "chat" });
+            }
+
+            var message = await _sharedService.Handle(new AddProjectChatMessageCommand
+            {
+                ProjectId = model.ProjectId,
+                UserId = currentUserId,
+                Testo = model.Testo
+            });
+            var user = await _sharedService.Query(new UserDetailQuery { Id = currentUserId });
+            var userName = string.IsNullOrWhiteSpace(user?.NickName) ? user?.Email : user.NickName;
+
+            await _publisher.Publish(new ProjectChatMessageEvent
+            {
+                IdGroup = model.ProjectId,
+                MessageId = message.Id,
+                UserId = currentUserId,
+                UserName = userName,
+                Testo = message.Testo,
+                DataCreazione = message.DataCreazione,
+                UtentiCoinvolti = await GetInvolvedUserIds(model.ProjectId, progetto.OwnerId)
+            });
+
+            if (Request.Headers["X-Requested-With"] == "XMLHttpRequest")
+            {
+                return Json(new
+                {
+                    id = message.Id,
+                    userId = currentUserId,
+                    userName,
+                    testo = message.Testo,
+                    dataCreazione = message.DataCreazione
+                });
+            }
+
+            return RedirectToAction(nameof(Dettaglio), new { id = model.ProjectId, tab = "chat" });
+        }
+
+        [HttpPost]
+        public virtual async Task<IActionResult> BoardSalva(BoardFormViewModel model)
+        {
+            if (!TryGetCurrentUserId(out var currentUserId))
+                return Challenge();
+
+            var progetto = await _sharedService.Query(new ProjectDetailQuery { Id = model.ProjectId });
+
+            if (progetto == null || progetto.OwnerId != currentUserId)
+                return Forbid();
+
+            if (string.IsNullOrWhiteSpace(model.Nome))
+            {
+                Alerts.AddError(this, "Il nome della board è obbligatorio");
+            }
+            else
+            {
+                if (model.Id.HasValue)
+                {
+                    var boardEsistente = await _sharedService.Query(new BoardDetailQuery { Id = model.Id.Value });
+                    if (boardEsistente == null || boardEsistente.ProjectId != model.ProjectId)
+                        return NotFound();
+                }
+
+                var boardId = await _sharedService.Handle(model.ToAddOrUpdateBoardCommand());
+                if (model.Id.HasValue)
+                    await _publisher.Publish(new BoardUpdatedEvent { ProjectId = model.ProjectId, BoardId = boardId, BoardNome = model.Nome, UtentiCoinvolti = await GetInvolvedUserIds(model.ProjectId, progetto.OwnerId) });
+                else
+                    await _publisher.Publish(new BoardCreatedEvent { ProjectId = model.ProjectId, BoardId = boardId, BoardNome = model.Nome, UtentiCoinvolti = await GetInvolvedUserIds(model.ProjectId, progetto.OwnerId) });
+                Alerts.AddSuccess(this, "Board salvata correttamente");
+            }
+
+            return RedirectToAction(nameof(Dettaglio), new { id = model.ProjectId, tab = "board" });
+        }
+
+        [HttpPost]
+        public virtual async Task<IActionResult> BoardElimina(Guid id, Guid projectId)
+        {
+            if (!TryGetCurrentUserId(out var currentUserId))
+                return Challenge();
+
+            var progetto = await _sharedService.Query(new ProjectDetailQuery { Id = projectId });
+
+            if (progetto == null || progetto.OwnerId != currentUserId)
+                return Forbid();
+
+            var board = await _sharedService.Query(new BoardDetailQuery { Id = id });
+            if (board == null || board.ProjectId != projectId)
+                return NotFound();
+
+            await _sharedService.Handle(new DeleteBoardCommand { Id = id });
+            await _publisher.Publish(new BoardDeletedEvent { ProjectId = projectId, BoardId = id, BoardNome = board.Nome, UtentiCoinvolti = await GetInvolvedUserIds(projectId, progetto.OwnerId) });
+
+            Alerts.AddSuccess(this, "Board eliminata");
+
+            return RedirectToAction(nameof(Dettaglio), new { id = projectId, tab = "board" });
+        }
+
+        [HttpPost]
+        public virtual async Task<IActionResult> MembroAggiungi(MemberFormViewModel model)
+        {
+            if (!TryGetCurrentUserId(out var currentUserId))
+                return Challenge();
+
+            var progetto = await _sharedService.Query(new ProjectDetailQuery { Id = model.ProjectId });
+            if (progetto == null || progetto.OwnerId != currentUserId)
+                return Forbid();
+
+            if (!ModelState.IsValid)
+            {
+                Alerts.AddError(this, "Inserisci un'email valida");
+                return RedirectToAction(nameof(Dettaglio), new { id = model.ProjectId, tab = "people" });
+            }
+
+            var email = model.Email.Trim();
+            var utenti = await _sharedService.Query(new UsersSelectQuery { IdCurrentUser = currentUserId, Filter = email });
+            var utente = utenti.Users.FirstOrDefault(u => string.Equals(u.Email, email, StringComparison.OrdinalIgnoreCase));
+
+            if (utente == null)
+            {
+                Alerts.AddError(this, "Nessun utente registrato trovato con questa email. L'utente deve prima creare un account.");
+            }
+            else if (utente.Id == progetto.OwnerId)
+            {
+                Alerts.AddError(this, "Questo utente è già il proprietario del progetto");
+            }
+            else
+            {
+                var aggiunto = await _sharedService.Handle(new AddProjectMemberCommand { ProjectId = model.ProjectId, UserId = utente.Id });
+                if (!aggiunto)
+                {
+                    Alerts.AddError(this, "Questo utente è già un collaboratore del progetto");
+                }
+                else
+                {
+                    await _publisher.Publish(new MemberAddedEvent
+                    {
+                        IdGroup = utente.Id,
+                        ProjectId = model.ProjectId,
+                        ProjectNome = progetto.Nome,
+                        ProjectDescrizione = progetto.Descrizione
+                    });
+                    Alerts.AddSuccess(this, "Collaboratore aggiunto al progetto");
+                }
+            }
+
+            return RedirectToAction(nameof(Dettaglio), new { id = model.ProjectId, tab = "people" });
+        }
+
+        [HttpPost]
+        public virtual async Task<IActionResult> MembroRimuovi(Guid projectId, Guid userId)
+        {
+            if (!TryGetCurrentUserId(out var currentUserId))
+                return Challenge();
+
+            var progetto = await _sharedService.Query(new ProjectDetailQuery { Id = projectId });
+            if (progetto == null || progetto.OwnerId != currentUserId)
+                return Forbid();
+
+            await _sharedService.Handle(new RemoveProjectMemberCommand { ProjectId = projectId, UserId = userId });
+            await _publisher.Publish(new MemberRemovedEvent { ProjectId = projectId, UserId = userId });
+
+            Alerts.AddSuccess(this, "Collaboratore rimosso dal progetto");
+
+            return RedirectToAction(nameof(Dettaglio), new { id = projectId, tab = "people" });
+        }
+    }
+}

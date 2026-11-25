@@ -1,0 +1,448 @@
+@model Ordo.Web.Features.Dashboard.DashboardViewModel
+@using Ordo.Services.Shared
+@using System.Security.Claims
+@using System.Linq
+@{
+    Layout = "_DashboardLayout";
+    ViewData["Title"] = "Dashboard";
+    var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+    var progettoPrincipale = Model.Progetti.FirstOrDefault();
+    var oggi = DateTime.Today;
+    var inizioSettimana = oggi.AddDays(-(((int)oggi.DayOfWeek + 6) % 7));
+}
+
+@section styles {
+    <link href="~/css/signalr-banner.css" asp-append-version="true" rel="stylesheet" />
+}
+
+<div class="ordo-dashboard-page">
+    <div id="lostConnection" class="ordo-signalr-banner d-none">
+        <i class="fa-solid fa-triangle-exclamation"></i> Connessione in tempo reale persa, riconnessione in corso...
+    </div>
+    <div id="lostConnectionManualRetry" class="ordo-signalr-banner ordo-signalr-banner-error d-none">
+        <i class="fa-solid fa-plug-circle-xmark"></i> Impossibile riconnettersi.
+        <a href="javascript:location.reload()">Ricarica la pagina</a>
+    </div>
+    <header class="ordo-dashboard-heading">
+        <div>
+            <h1>Buongiorno, @Model.NomeUtente</h1>
+            <p>Qui trovi una panoramica del lavoro da seguire.</p>
+        </div>
+        <section class="ordo-dashboard-stats ordo-dashboard-stats-summary" aria-label="Riepilogo attività">
+            <button type="button" class="ordo-dashboard-stat todo @(Model.AttivitaDaFare > 0 ? "has-value" : "")" data-dashboard-filter="todo" aria-pressed="false">
+                <span>Da fare</span><strong>@Model.AttivitaDaFare</strong>
+            </button>
+            <button type="button" class="ordo-dashboard-stat progress @(Model.AttivitaInCorso > 0 ? "has-value" : "")" data-dashboard-filter="inprogress" aria-pressed="false">
+                <span>In corso</span><strong>@Model.AttivitaInCorso</strong>
+            </button>
+            <button type="button" class="ordo-dashboard-stat review @(Model.AttivitaInRevisione > 0 ? "has-value" : "")" data-dashboard-filter="review" aria-pressed="false">
+                <span>Revisione</span><strong>@Model.AttivitaInRevisione</strong>
+            </button>
+            <button type="button" class="ordo-dashboard-stat overdue @(Model.AttivitaScadute > 0 ? "has-value" : "")" data-dashboard-filter="overdue" aria-pressed="false">
+                <span>Scadute</span><strong>@Model.AttivitaScadute</strong>
+            </button>
+        </section>
+    </header>
+
+    <div class="ordo-dashboard-focus-grid">
+        @if (progettoPrincipale != null)
+        {
+            <a class="ordo-dashboard-continue"
+               href="@Url.Action(MVC.Progetti.Progetti.Dettaglio(progettoPrincipale.Id))?tab=board">
+                <div class="ordo-dashboard-continue-icon"><i class="fa-solid fa-arrow-right"></i></div>
+                <div>
+                    <span class="ordo-dashboard-kicker">Progetto principale</span>
+                    <h2>@progettoPrincipale.Nome</h2>
+                    <span class="ordo-dashboard-continue-hint">Apri la board e continua il lavoro</span>
+                    <div class="ordo-dashboard-progress">
+                        <span style="width:@(progettoPrincipale.NumeroTask == 0 ? 0 : progettoPrincipale.NumeroTaskCompletate * 100 / progettoPrincipale.NumeroTask)%"></span>
+                    </div>
+                </div>
+                <strong>@progettoPrincipale.NumeroTaskCompletate/@progettoPrincipale.NumeroTask</strong>
+            </a>
+        }
+        else
+        {
+            <section class="ordo-dashboard-onboarding" aria-label="Primi passi">
+                <h2>Inizia da qui</h2>
+                <ul class="ordo-onboarding-list">
+                    <li class="ordo-onboarding-item next">
+                        <i class="fa-regular fa-circle"></i>
+                        <button type="button" class="ordo-onboarding-link" data-open-project-modal>
+                            Crea il tuo primo progetto
+                        </button>
+                    </li>
+                    <li class="ordo-onboarding-item">
+                        <i class="fa-regular fa-circle"></i>
+                        <span>Apri la board predefinita</span>
+                    </li>
+                    <li class="ordo-onboarding-item">
+                        <i class="fa-regular fa-circle"></i>
+                        <span>Invita i collaboratori dal progetto</span>
+                    </li>
+                </ul>
+            </section>
+        }
+        <section class="ordo-dashboard-week">
+            <div class="ordo-dashboard-week-header">
+                <div>
+                    <span class="ordo-dashboard-week-caption">Calendario</span>
+                    <h2 id="dashboardWeekLabel">Questa settimana</h2>
+                </div>
+                <div class="ordo-dashboard-week-navigation" aria-label="Navigazione calendario">
+                    <button type="button" class="ordo-dashboard-week-nav" data-dashboard-week-offset="-1" aria-label="Settimana precedente">
+                        <i class="fa-solid fa-chevron-left"></i>
+                    </button>
+                    <button type="button" class="ordo-dashboard-week-today" data-dashboard-week-today>Oggi</button>
+                    <button type="button" class="ordo-dashboard-week-nav" data-dashboard-week-offset="1" aria-label="Settimana successiva">
+                        <i class="fa-solid fa-chevron-right"></i>
+                    </button>
+                </div>
+            </div>
+            <div class="ordo-dashboard-week-days">
+                @foreach (var dayOffset in Enumerable.Range(0, 7))
+                {
+                    var giorno = inizioSettimana.AddDays(dayOffset);
+                    var attivitaGiorno = Model.AttivitaSettimana[dayOffset];
+                    var nomeGiorno = giorno.ToString("ddd").Replace(".", "").Substring(0, 1).ToUpperInvariant();
+                    <button type="button"
+                            class="ordo-dashboard-week-day @(giorno == oggi ? "today" : "") @(attivitaGiorno > 0 ? "has-tasks" : "")"
+                            data-dashboard-day="@giorno.ToString("yyyy-MM-dd")"
+                            aria-pressed="false">
+                        <span class="ordo-dashboard-week-day-name">@nomeGiorno</span>
+                        <small>@giorno.ToString("dd")</small>
+                        <b class="level-@Math.Min(attivitaGiorno, 3)">@attivitaGiorno</b>
+                    </button>
+                }
+            </div>
+        </section>
+    </div>
+
+    <div class="ordo-dashboard-grid">
+    <section class="ordo-dashboard-section ordo-dashboard-section-primary">
+        <div class="ordo-section-title">
+            <h2>Le mie attività</h2>
+            <span>Le prossime da seguire</span>
+        </div>
+
+        @if (!Model.Attivita.Any())
+        {
+            <div class="ordo-dashboard-empty">
+                <div class="ordo-empty-icon blue"><i class="fa-regular fa-circle-check"></i></div>
+                <strong>Nessuna attività assegnata</strong>
+                <span>Le attività assegnate a te compariranno qui.</span>
+            </div>
+        }
+        else
+        {
+            <div class="ordo-dashboard-table-wrap">
+                <table class="ordo-dashboard-table">
+                    <thead>
+                    <tr>
+                        <th>Attività</th>
+                        <th>Progetto</th>
+                        <th>Stato</th>
+                        <th>Scadenza</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    @foreach (var task in Model.Attivita)
+                    {
+                        var stato = task.Stato switch
+                        {
+                            TaskState.ToDo => "Da fare",
+                            TaskState.InProgress => "In corso",
+                            TaskState.Review => "In revisione",
+                            _ => "Completata"
+                        };
+
+                        var scaduta = task.Scadenza.HasValue &&
+                                      task.Scadenza.Value.Date < DateTime.Today;
+                        var giorniAllaScadenza = task.Scadenza.HasValue
+                            ? (task.Scadenza.Value.Date - oggi).Days
+                            : int.MaxValue;
+                        var urgenza = giorniAllaScadenza < 0
+                            ? "In ritardo"
+                            : giorniAllaScadenza == 0
+                                ? "Oggi"
+                                : giorniAllaScadenza <= 3
+                                    ? "A breve"
+                                    : null;
+
+                        <tr data-dashboard-task
+                            data-task-state="@task.Stato.ToString().ToLowerInvariant()"
+                            data-task-overdue="@((scaduta).ToString().ToLowerInvariant())"
+                            data-task-date="@(task.Scadenza?.ToString("yyyy-MM-dd") ?? "")"
+                            data-project-id="@task.ProjectId">
+                            <td>
+                                <a class="ordo-task-link"
+                                   asp-area="Progetti"
+                                   asp-controller="Progetti"
+                                   asp-action="Dettaglio"
+                                   asp-route-id="@task.ProjectId"
+                                   asp-route-tab="board"
+                                   asp-route-task="@task.Id">
+                                    <strong>@task.Titolo</strong>
+                                </a>
+                            </td>
+                            <td>@task.Progetto <small>@task.Board</small></td>
+                            <td><span class="ordo-status stato-@task.Stato.ToString().ToLowerInvariant()">@stato</span></td>
+                            <td class="@(scaduta ? "is-overdue" : "")">
+                                @if (urgenza != null)
+                                {
+                                    <span class="ordo-due-badge @(giorniAllaScadenza <= 0 ? "urgent" : "soon")">@urgenza</span>
+                                }
+                                <span>@(task.Scadenza?.ToString("dd MMM yyyy") ?? "Nessuna scadenza")</span>
+                            </td>
+                        </tr>
+                    }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </section>
+
+    <section class="ordo-dashboard-section">
+        <div class="ordo-section-title">
+            <h2>I miei progetti</h2>
+            <span>Progetti creati da te</span>
+        </div>
+
+        @if (!Model.Progetti.Any())
+        {
+            <div class="ordo-dashboard-empty">
+                <div class="ordo-empty-icon orange"><i class="fa-regular fa-folder-open"></i></div>
+                <strong>Inizia con il tuo primo progetto</strong>
+                <span>Organizza attività, persone e conversazioni in un unico spazio.</span>
+                <button type="button" class="ordo-empty-action" data-open-project-modal>
+                    <i class="fa-solid fa-plus"></i> Crea un progetto
+                </button>
+            </div>
+        }
+        else
+        {
+            <div class="ordo-project-grid">
+                @foreach (var project in Model.Progetti)
+                {
+                    <a class="ordo-project-card ordo-project-card-link"
+                       data-dashboard-project
+                       data-project-id="@project.Id"
+                       href="@Url.Action(MVC.Progetti.Progetti.Dettaglio(project.Id))?tab=board">
+                        <div class="ordo-project-card-title"><span class="ordo-project-icon"><i class="fa-regular fa-folder-open"></i></span><h3>@project.Nome</h3></div>
+                        <p>@(string.IsNullOrWhiteSpace(project.Descrizione) ? "Nessuna descrizione." : project.Descrizione)</p>
+                        <footer>
+                            <span>@project.NumeroBoard board</span>
+                            <span>@project.NumeroTask attività</span>
+                        </footer>
+                    </a>
+                }
+                <button type="button" class="ordo-project-card ordo-project-card-invite"
+                        data-open-project-modal>
+                    <i class="fa-solid fa-plus"></i>
+                    <span>Nuovo progetto</span>
+                </button>
+            </div>
+        }
+    </section>
+    </div>
+    <div id="dashboardFilterEmpty" class="ordo-dashboard-filter-empty" hidden>
+        Nessuna attività corrisponde al filtro selezionato.
+    </div>
+
+    <div id="create-project-modal" class="ordo-dashboard-modal-backdrop" hidden>
+        <section class="ordo-dashboard-modal" role="dialog" aria-modal="true"
+                 aria-labelledby="create-project-modal-title" aria-describedby="create-project-modal-description">
+            <header class="ordo-dashboard-modal-header">
+                <div>
+                    <span class="ordo-dashboard-modal-icon"><i class="fa-regular fa-folder-open"></i></span>
+                    <div>
+                        <span class="ordo-eyebrow">Nuovo spazio di lavoro</span>
+                        <h2 id="create-project-modal-title">Crea un progetto</h2>
+                    </div>
+                </div>
+                <button type="button" class="ordo-modal-close" data-close-project-modal aria-label="Chiudi">&times;</button>
+            </header>
+            <form class="ordo-project-form ordo-dashboard-project-form" method="post"
+                  action="@Url.Action(MVC.Progetti.Progetti.Edit())">
+                @Html.AntiForgeryToken()
+                <p id="create-project-modal-description" class="ordo-dashboard-modal-description">
+                    Crea uno spazio per organizzare attività, persone e conversazioni.
+                </p>
+                <div class="ordo-field">
+                    <label for="dashboardProjectName">Nome progetto</label>
+                    <input id="dashboardProjectName" name="Nome" required autocomplete="off"
+                           placeholder="Es. Rilascio prodotto" />
+                </div>
+                <div class="ordo-field">
+                    <label for="dashboardProjectDescription">Descrizione <span>(facoltativa)</span></label>
+                    <textarea id="dashboardProjectDescription" name="Descrizione" rows="4"
+                              placeholder="A cosa serve questo progetto?"></textarea>
+                </div>
+                <div class="ordo-project-form-actions">
+                    <button type="button" class="ordo-btn-secondary" data-close-project-modal>Annulla</button>
+                    <button type="submit" class="ordo-btn-primary">Crea progetto</button>
+                </div>
+            </form>
+        </section>
+    </div>
+</div>
+
+@section scripts {
+    <script>
+        (function () {
+            const modal = document.getElementById("create-project-modal");
+            const openButtons = document.querySelectorAll("[data-open-project-modal]");
+            const closeButtons = document.querySelectorAll("[data-close-project-modal]");
+            const nameInput = document.getElementById("dashboardProjectName");
+
+            function closeModal() {
+                if (modal) {
+                    modal.hidden = true;
+                }
+            }
+
+            openButtons.forEach(function (openButton) {
+                openButton.addEventListener("click", function () {
+                    if (!modal) return;
+                    modal.hidden = false;
+                    nameInput?.focus();
+                });
+            });
+            closeButtons.forEach(button => button.addEventListener("click", closeModal));
+            modal?.addEventListener("click", function (event) {
+                if (event.target === modal) closeModal();
+            });
+            document.addEventListener("keydown", function (event) {
+                if (event.key === "Escape" && modal && !modal.hidden) closeModal();
+            });
+        })();
+    </script>
+    <script src="/js/bundle-signalr.js" asp-append-version="true"></script>
+    <script>
+        (function () {
+            var filterButtons = document.querySelectorAll("[data-dashboard-filter]");
+            var dayButtons = document.querySelectorAll("[data-dashboard-day]");
+            var taskRows = document.querySelectorAll("[data-dashboard-task]");
+            var projectCards = document.querySelectorAll("[data-dashboard-project]");
+            var emptyState = document.getElementById("dashboardFilterEmpty");
+            var weekLabel = document.getElementById("dashboardWeekLabel");
+            var weekNavigation = document.querySelectorAll("[data-dashboard-week-offset]");
+            var todayButton = document.querySelector("[data-dashboard-week-today]");
+            var currentFilter = null;
+            var currentDay = "";
+            var currentWeekStart = new Date("@inizioSettimana.ToString("yyyy-MM-dd")T00:00:00");
+            var todayKey = "@oggi.ToString("yyyy-MM-dd")";
+            var italianDate = new Intl.DateTimeFormat("it-IT", { day: "numeric", month: "short" });
+
+            function dateKey(date) {
+                return date.getFullYear() + "-" +
+                    String(date.getMonth() + 1).padStart(2, "0") + "-" +
+                    String(date.getDate()).padStart(2, "0");
+            }
+
+            function renderWeek() {
+                var weekEnd = new Date(currentWeekStart);
+                weekEnd.setDate(weekEnd.getDate() + 6);
+                weekLabel.textContent = italianDate.format(currentWeekStart) + " - " + italianDate.format(weekEnd);
+
+                dayButtons.forEach(function (button, index) {
+                    var day = new Date(currentWeekStart);
+                    day.setDate(day.getDate() + index);
+                    var key = dateKey(day);
+                    var taskCount = Array.from(taskRows).filter(function (row) {
+                        return row.dataset.taskDate === key;
+                    }).length;
+                    var countElement = button.querySelector("b");
+
+                    button.dataset.dashboardDay = key;
+                    button.classList.toggle("today", key === todayKey);
+                    button.classList.toggle("has-tasks", taskCount > 0);
+                    button.classList.toggle("is-selected", key === currentDay);
+                    button.setAttribute("aria-pressed", (key === currentDay).toString());
+                    button.querySelector(".ordo-dashboard-week-day-name").textContent =
+                        new Intl.DateTimeFormat("it-IT", { weekday: "short" }).format(day).replace(".", "").slice(0, 1).toUpperCase();
+                    button.querySelector("small").textContent = String(day.getDate()).padStart(2, "0");
+                    countElement.textContent = taskCount;
+                    countElement.className = "level-" + Math.min(taskCount, 3);
+                });
+            }
+
+            function matchesFilter(row, filter) {
+                if (filter === "overdue") return row.dataset.taskOverdue === "true";
+                return row.dataset.taskState === filter;
+            }
+
+            function applyFilters() {
+                var visibleProjectIds = new Set();
+                var visibleTaskCount = 0;
+
+                taskRows.forEach(function (row) {
+                    var visible = (!currentFilter || matchesFilter(row, currentFilter)) &&
+                        (!currentDay || row.dataset.taskDate === currentDay);
+                    row.hidden = !visible;
+                    if (visible) {
+                        visibleTaskCount++;
+                        visibleProjectIds.add(row.dataset.projectId);
+                    }
+                });
+
+                projectCards.forEach(function (card) {
+                    card.hidden = !!currentFilter && !visibleProjectIds.has(card.dataset.projectId);
+                });
+
+                filterButtons.forEach(function (button) {
+                    var active = button.dataset.dashboardFilter === currentFilter;
+                    button.classList.toggle("is-selected", active);
+                    button.setAttribute("aria-pressed", active.toString());
+                });
+
+                emptyState.hidden = (!currentFilter && !currentDay) || visibleTaskCount > 0;
+            }
+
+            filterButtons.forEach(function (button) {
+                button.addEventListener("click", function () {
+                    currentFilter = currentFilter === button.dataset.dashboardFilter ? null : button.dataset.dashboardFilter;
+                    applyFilters();
+                });
+            });
+            dayButtons.forEach(function (button) {
+                button.addEventListener("click", function () {
+                    currentDay = currentDay === button.dataset.dashboardDay
+                        ? ""
+                        : button.dataset.dashboardDay;
+                    applyFilters();
+                    renderWeek();
+                });
+            });
+            weekNavigation.forEach(function (button) {
+                button.addEventListener("click", function () {
+                    currentWeekStart.setDate(currentWeekStart.getDate() + Number(button.dataset.dashboardWeekOffset) * 7);
+                    currentDay = "";
+                    renderWeek();
+                    applyFilters();
+                });
+            });
+            todayButton.addEventListener("click", function () {
+                currentWeekStart = new Date("@inizioSettimana.ToString("yyyy-MM-dd")T00:00:00");
+                currentDay = "";
+                renderWeek();
+                applyFilters();
+            });
+
+            renderWeek();
+        })();
+
+        var signalRManager = new SignalRConnectionManager("/OrdoHub", "@currentUserId", "JoinGroup", "LeaveGroup");
+        signalRManager.registerEvents();
+
+        signalRManager.connection.on("TaskChangedForUser", function (tipo, titolo, projectNome, projectId, boardId, taskId) {
+            var message = tipo === "Assigned"
+                ? "Ti è stata assegnata l'attività «" + titolo + "» in " + projectNome + "."
+                : "L'attività «" + titolo + "» è stata aggiornata.";
+            ordoNotify(message, "/Progetti/Dettaglio/" + projectId + "?tab=board&task=" + taskId, "task", 1200, function () { location.reload(); });
+        });
+        signalRManager.connection.on("ProjectUpdated", function () { location.reload(); });
+        window.addEventListener("ordo:signalr-reconnected", function () { location.reload(); });
+        signalRManager.startConnection();
+    </script>
+}
